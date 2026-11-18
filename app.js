@@ -84,6 +84,7 @@
     },
   ];
   const pages = [
+    ["Smart Desk", "package-open"],
     ["Requests", "clipboard-list"],
     ["Inventory", "package"],
     ["Loan register", "book-open"],
@@ -91,7 +92,7 @@
   ];
   const original = () => ({
     version: 1,
-    tab: "Requests",
+    tab: "Smart Desk",
     phase: 0,
     selected: "",
     filter: "All items",
@@ -333,7 +334,101 @@
       '<form data-note><div class="form"><label class="full"><span>Note for the next shift</span><textarea name="note" rows="2" maxlength="400" required></textarea></label></div><button type="submit">Add handover note</button></form>'
     );
   }
+  
+  // Smart Desk: deterministic, explainable suggestions. No external AI service.
+  const smartTimes = ["Fri 8 pm", "Sat 9 am", "Sat 10 am", "Sat noon"];
+  const smartRequest = () => getReq(s.smartReq) || requests[0];
+  const smartLoans = (id) => s.loans.filter(l => l.req === id);
+  const smartOpen = (id) => smartLoans(id).filter(l => !l.back);
+  const smartAvailable = type => assets.filter(a => a.type === type && !a.repair && !out(a.id));
+  const smartNum = () => Math.max(400, ...s.loans.map(l => l.num)) + 1;
+  const smartLabel = l => `${l.asset} · ${getAsset(l.asset).type}`;
+  const smartHolder = l => l.reportedHolder || l.who;
+  const smartDue = l => l.expectedReturn || l.due;
+  const smartOverdue = l => s.phase === 2 && l.due === "Fri 8 pm" && !l.back;
+  const smartEscape = esc;
+  const smartSelect = (name, values, selected = '') => `<select name="${name}" required>${values.map(([v,t]) => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+  function smartDesk() {
+    const r = smartRequest();
+    const loans = smartLoans(r.id);
+    const open = smartOpen(r.id);
+    const returned = loans.filter(l => l.back).length;
+    const missing = r.items.filter(type => !open.some(l => getAsset(l.asset).type === type));
+    const unissued = r.items.filter(type => !loans.some(l => getAsset(l.asset).type === type));
+    const blocked = unissued.filter(type => !smartAvailable(type).length);
+    const suggested = r.id === 'RQ-214' && s.phase === 0 ? 'Kabir Sen' : r.owner;
+    let html = `<div class="smart-desk"><div class="smart-title"><div><small>COUNTER WORKSPACE</small><h2>Smart Desk</h2><p>One request, from pickup to handover.</p></div><span class="smart-chip">Offline guidance</span></div>
+      <label class="smart-field">Event ${smartSelect('smart-request', requests.map(x => [x.id, `${x.club} · ${x.event}`]),r.id)}</label>
+      <div class="smart-stats"><div><small>Approved</small><b>${r.items.length}</b></div><div><small>On loan</small><b>${open.length}</b></div><div><small>Returned slips</small><b>${returned}</b></div></div>
+      <section class="smart-panel"><h3>${esc(r.event)}</h3><p>${esc(r.id)} · Requested by ${esc(r.owner)} · Original deadline ${esc(r.due)}</p><p>${esc(r.note)}</p>`;
+    if (r.id === 'RQ-214' && s.phase === 0) html += `<p class="smart-alert">Pickup message: Kabir Sen is the designated collector. The USB-C adapter is required for the screening setup.</p>`;
+    if (s.phase === 0 || unissued.length) {
+      html += `<form data-smart-issue><h3>Prepare kit</h3>`;
+      for (const type of r.items) {
+        const existing = loans.filter(l => getAsset(l.asset).type === type);
+        const available = smartAvailable(type);
+        if (existing.length) html += `<div class="smart-item"><b>${esc(type)}</b><span>${esc(existing.map(l=>`${l.asset} (${l.back?'returned':'on loan'})`).join(', '))}</span></div>`;
+        else if (!available.length) html += `<div class="smart-item"><b>${esc(type)}</b><span class="smart-warning">No eligible stock</span></div>`;
+        else html += `<label class="smart-field">${esc(type)} ${smartSelect('unit', available.map(a=>[a.id, `${a.id} · ${a.model} · Shelf ${a.bin}`]))}</label>`;
+      }
+      if (unissued.length) html += `<label class="smart-field">Confirm collector ${smartSelect('who', people.map(p=>[p,p]),suggested)}</label><p>Deadline: <b>${esc(r.due)}</b> (from approved request)</p><button type="submit" class="primary"${blocked.length?' disabled':''}>Issue ${unissued.length} remaining item(s)</button>`;
+      else html += '<p>All approved equipment has a recorded issue slip.</p>';
+      html += '</form>';
+    }
+    html += '</section>';
+    if (open.length) {
+      html += `<section class="smart-panel"><h3>Returns &amp; custody</h3><p>Match the physical asset label before recording a return. Record only items actually received.</p>`;
+      if (r.id==='RQ-214' && s.phase>=1) html += '<p class="smart-alert">Desk message reports that Leela Das has the adapter and expects to bring it Saturday at 9 am. Confirm this information only if it matches the outstanding asset.</p>';
+      html += '<form data-smart-return>';
+      for (const l of open) html += `<label class="smart-check"><input type="checkbox" name="slip" value="${l.num}"> <b>${esc(smartLabel(l))}</b><span>${esc(l.reportedHolder ? 'Reported holder: '+l.reportedHolder : 'Issued to: '+l.who)} · Expected: ${esc(smartDue(l))}${smartOverdue(l)?' · Original deadline missed':''}</span></label>`;
+      html += `<button type="submit" class="primary">Record selected returns</button></form>`;
+      for (const l of open) {
+        const hint = r.id==='RQ-214' && s.phase>=1 && getAsset(l.asset).type==='USB-C → HDMI adapter';
+        html += `<details class="smart-custody"><summary>Update reported custody · ${esc(l.asset)}</summary><form data-smart-custody data-slip="${l.num}"><p>Original collector: ${esc(l.who)} · Due ${esc(l.due)}</p><label class="smart-field">Reported holder ${smartSelect('holder',people.map(p=>[p,p]),l.reportedHolder||(hint?'Leela Das':l.who))}</label><label class="smart-field">Expected return ${smartSelect('expected',smartTimes.map(t=>[t,t]),l.expectedReturn||(hint?'Sat 9 am':l.due))}</label><label class="smart-field">Source / explanation <input name="source" required maxlength="200" value="${esc(l.custodySource||(hint?'Friday evening message from Kabir Sen':''))}" placeholder="Who reported this?"></label><button type="submit">Confirm reported custody</button></form></details>`;
+      }
+      html += '</section>';
+    }
+    html += `<section class="smart-panel"><h3>Live shift briefing</h3><p>Generated from all outstanding loan records. Original deadlines remain visible.</p>`;
+    const pending = s.loans.filter(l=>!l.back).sort((a,b)=>Number(smartOverdue(b))-Number(smartOverdue(a)) || smartTimes.indexOf(smartDue(a))-smartTimes.indexOf(smartDue(b)));
+    if (!pending.length) html += '<p>No outstanding loans.</p>';
+    for (const l of pending) html += `<div class="smart-item"><div><b>${esc(smartLabel(l))}</b><p>${esc(getReq(l.req).club)} · ${esc(l.reportedHolder?'Reported holder: '+l.reportedHolder:'Issued to: '+l.who)}<br>Expected: ${esc(smartDue(l))} · Original due: ${esc(l.due)}${l.custodySource?'<br>Source: '+esc(l.custodySource):''}</p></div>${smartOverdue(l)?'<span class="smart-warning">Past original deadline</span>':''}</div>`;
+    if (unissued.length && s.phase>=1) html += `<p class="smart-alert">${esc(r.id)}: ${unissued.length} approved item(s) have no recorded issue. Investigate rather than assume collection.</p>`;
+    html += '<button type="button" data-action="smart-note">Save briefing to Desk book</button></section></div>';
+    return html;
+  }
+  function smartSubmit(f, form) {
+    if (f.matches('[data-smart-issue]')) {
+      const r=smartRequest(), who=form.get('who'), ids=form.getAll('unit');
+      const needs=r.items.filter(type=>!smartLoans(r.id).some(l=>getAsset(l.asset).type===type));
+      const units=ids.map(getAsset);
+      if (!needs.length || !people.includes(who) || units.length!==needs.length || new Set(ids).size!==ids.length || units.some(a=>!a||a.repair||out(a.id)) || needs.some(type=>units.filter(a=>a.type===type).length!==1)) { commit('Kit not issued: check availability and approved equipment.'); return true; }
+      for (const a of units) s.loans.push({num:smartNum(),req:r.id,asset:a.id,who,due:r.due,back:false});
+      commit(`Issued ${units.length} item(s) to ${who}; individual loan slips retained.`); return true;
+    }
+    if (f.matches('[data-smart-return]')) {
+      const ids=form.getAll('slip').map(Number), open=smartOpen(smartRequest().id);
+      if (!ids.length || new Set(ids).size!==ids.length || ids.some(id=>!open.some(l=>l.num===id))) {commit('Select valid outstanding items to return.'); return true;}
+      for (const id of ids) open.find(l=>l.num===id).back=true;
+      commit(`Recorded ${ids.length} return(s). Other items remain outstanding.`); return true;
+    }
+    if (f.matches('[data-smart-custody]')) {
+      const l=smartOpen(smartRequest().id).find(l=>l.num===Number(f.dataset.slip));
+      const holder=form.get('holder'), expected=form.get('expected'), explanation=String(form.get('source')||'').trim();
+      if (!l || !people.includes(holder) || !smartTimes.includes(expected) || !explanation || explanation.length>200) {commit('Custody not changed: confirm holder, expected return and source.'); return true;}
+      l.custodyHistory=[...(l.custodyHistory||[]),{holder,expected,source:explanation,phase:s.phase}];
+      l.reportedHolder=holder; l.expectedReturn=expected; l.custodySource=explanation;
+      commit(`Reported custody recorded for ${l.asset}; original loan retained.`); return true;
+    }
+    return false;
+  }
+  function smartSaveNote() {
+    const pending=s.loans.filter(l=>!l.back);
+    const text=pending.length?pending.map(l=>`${l.req} / ${l.asset}: ${l.reportedHolder?'reported holder '+l.reportedHolder:'issued to '+l.who}; expected ${smartDue(l)}; original due ${l.due}.`).join('\n'):'No outstanding loans at this shift.';
+    s.notes.push({phase:s.phase,text}); commit('Live briefing saved to Desk book.');
+  }
+
   const screens = {
+    "Smart Desk": smartDesk,
     Requests: requestPage,
     Inventory: inventory,
     "Loan register": register,
@@ -380,6 +475,7 @@
     if (!b) return;
     const v = b.dataset.val;
     switch (b.dataset.action) {
+      case "smart-note": smartSaveNote(); return;
       case "restart":
         s = original();
         break;
@@ -417,6 +513,10 @@
     commit();
   });
   root.addEventListener("change", (e) => {
+    if (e.target.matches('[name="smart-request"]')) {
+      if (getReq(e.target.value)) { s.smartReq=e.target.value; commit(); }
+      return;
+    }
     if (e.target.matches("[data-filter]")) {
       s.filter = e.target.value;
       commit();
@@ -426,6 +526,7 @@
     e.preventDefault();
     const f = e.target;
     const form = new FormData(f);
+    if (smartSubmit(f, form)) return;
     if (f.matches("[data-note]")) {
       const text = String(form.get("note")).trim();
       if (!text) return;
